@@ -1,0 +1,223 @@
+#include <WiFi.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+// ================= WiFi =================
+const char* ssid = "tavich30_2.4GHz";
+const char* password = "2515251530";
+const char* google_script_url = "https://script.google.com/macros/s/AKfycbw8LJzGXnLA1pS-IegUgCUvsbwEoxNqBgQ64RkayrC7ShwdDIBJp7gMN0aRNXOrV_gH/exec";
+
+// ================= Pin =================
+#define PIN_TRIG 12
+#define PIN_ECHO 13
+#define PIN_LDR 34
+#define PIN_LED 27
+#define PIN_BUZZER 14
+#define PIN_BUTTON 26
+
+#define LDR_THRESHOLD 1200
+
+Adafruit_MPU6050 mpu;
+
+// ================= Motion =================
+float prev_accel = 9.81;
+unsigned long lastMotionSend = 0;
+const unsigned long MOTION_COOLDOWN = 3000;
+bool motionLocked = false;
+const float MOTION_THRESHOLD = 1.8;
+const float MOTION_RESET_THRESHOLD = 0.3;
+
+// ================= Stock =================
+bool stockWasEmpty = false;
+
+// ================= Welcome =================
+bool customerNear = false;
+
+// ================= Buzzer =================
+void playTone(int freq, int duration) {
+  ledcWriteTone(PIN_BUZZER, freq);
+  delay(duration);
+  ledcWriteTone(PIN_BUZZER, 0);
+}
+
+// 🔊 Sound Patterns
+void soundBoot() {
+  playTone(1000, 120);
+  delay(50);
+  playTone(1500, 120);
+}
+
+void soundButton() {
+  playTone(2000, 80);
+}
+
+void soundPicked() {
+  playTone(1500, 120);
+  delay(50);
+  playTone(1800, 120);
+}
+
+void soundEmpty() {
+  playTone(500, 400);
+}
+
+void soundWelcome() {
+  playTone(1200, 80);
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
+
+  // ✅ FIX BUZZER (สำคัญมาก)
+  ledcAttach(PIN_BUZZER, 2000, 8);
+
+  // MPU
+  if (!mpu.begin()) {
+    Serial.println("MPU6050 ERROR");
+  } else {
+    Serial.println("MPU6050 READY");
+  }
+
+  // WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected");
+
+  // 🔊 Boot
+  soundBoot();
+}
+
+// ================= LOOP =================
+void loop() {
+
+  // ===== Ultrasonic =====
+  long duration, distance;
+  digitalWrite(PIN_TRIG, LOW); delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+
+  duration = pulseIn(PIN_ECHO, HIGH, 30000);
+  distance = (duration / 2) / 29.1;
+
+  // ===== MPU =====
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  float total_accel = sqrt(
+    pow(a.acceleration.x, 2) +
+    pow(a.acceleration.y, 2) +
+    pow(a.acceleration.z, 2)
+  );
+
+  float delta_accel = abs(total_accel - prev_accel);
+
+  // ===== LDR =====
+  int ldrValue = analogRead(PIN_LDR);
+  bool stockEmpty = (ldrValue < LDR_THRESHOLD);
+
+  // ===== Debug =====
+  Serial.printf("Dist:%ld | dA:%.2f | LDR:%d | BTN:%d\n",
+                distance, delta_accel, ldrValue, digitalRead(PIN_BUTTON));
+
+  // ==================================================
+  // 🔴 BUTTON (Priority สูงสุด)
+  // ==================================================
+  if (digitalRead(PIN_BUTTON) == LOW) {
+    Serial.println(">>> BUTTON PRESSED <<<");
+
+    digitalWrite(PIN_LED, HIGH);
+    soundButton();
+
+    delay(200);
+    return; // ✅ กัน logic อื่นทับ
+  }
+
+  // ==================================================
+  // 🟢 WELCOME LED + SOUND
+  // ==================================================
+  if (distance > 0 && distance < 80) {
+    digitalWrite(PIN_LED, HIGH);
+
+    if (!customerNear) {
+      soundWelcome();
+      customerNear = true;
+    }
+  } else {
+    digitalWrite(PIN_LED, LOW);
+    customerNear = false;
+  }
+
+  // ==================================================
+  // 🔊 PRODUCT PICKED
+  // ==================================================
+  unsigned long now = millis();
+
+  if (!stockEmpty &&
+      delta_accel > MOTION_THRESHOLD &&
+      !motionLocked &&
+      (now - lastMotionSend > MOTION_COOLDOWN)) {
+
+    Serial.println(">>> PRODUCT PICKED <<<");
+
+    soundPicked();
+    sendToGoogleSheets("Product_Picked", delta_accel, ldrValue);
+
+    lastMotionSend = now;
+    motionLocked = true;
+  }
+
+  if (delta_accel < MOTION_RESET_THRESHOLD) {
+    motionLocked = false;
+  }
+
+  prev_accel = total_accel;
+
+  // ==================================================
+  // 🔊 STOCK EMPTY
+  // ==================================================
+  if (stockEmpty && !stockWasEmpty) {
+    Serial.println(">>> STOCK EMPTY <<<");
+
+    soundEmpty();
+    sendToGoogleSheets("Stock_Empty", 0, ldrValue);
+  }
+
+  stockWasEmpty = stockEmpty;
+
+  delay(200);
+}
+
+// ================= SEND =================
+void sendToGoogleSheets(String event, float value, int ldr) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+
+    String url = String(google_script_url) +
+                 "?event=" + event +
+                 "&value=" + String(value) +
+                 "&ldr=" + String(ldr);
+
+    Serial.println("Sending...");
+
+    if (http.begin(client, url)) {
+      int code = http.GET();
+      Serial.println("HTTP: " + String(code));
+      http.end();
+    }
+  }
+}
