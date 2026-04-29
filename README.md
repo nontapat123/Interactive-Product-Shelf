@@ -16,3 +16,7 @@ Dashboard flนจังเดือนว่า "Stock Empty! Please refill"
 ㆍLDR (เช็คสด็อกสินค้า)
 ㆍBuzzer & LED (ตอบสนองกับลูกค้า)
 ㆍButton (ฟังก์ขัน Reset หรือเช็คสถานะหน้างาน)
+
+_____________________________________________________________________________
+ลิ้งค์เปิดวีดีโอ:
+https://drive.google.com/file/d/10B6bGK0YAqF5ZR2PxT2ii5ntKvjJo7l7/view?usp=sharing
